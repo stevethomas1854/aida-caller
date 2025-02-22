@@ -50,7 +50,7 @@ fastify.get('/', async (_, reply) => {
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Initialize Supabase client
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Helper function to get signed URL for authenticated conversations
 async function getSignedUrl() {
