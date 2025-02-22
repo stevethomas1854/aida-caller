@@ -5,6 +5,8 @@ import Fastify from 'fastify';
 import Twilio from 'twilio';
 import WebSocket from 'ws';
 
+// https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
+
 // Load environment variables from .env file
 dotenv.config();
 
