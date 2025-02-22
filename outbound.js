@@ -42,6 +42,9 @@ fastify.register(fastifyWs);
 
 const PORT = process.env.PORT || 8000;
 
+// Add this near the top of the file with other initializations
+const callContextStore = new Map();
+
 // Root route for health check
 fastify.get('/', async (_, reply) => {
   reply.send({ message: 'Server is running' });
@@ -105,6 +108,7 @@ fastify.post('/outbound-call', async (request, reply) => {
 
     if (response.ok) {
       const context = await response.json();
+      console.log('[Supabase] Context:', context);
       
       // Set dynamic variables based on context
       dynamicVariables = {
@@ -116,7 +120,9 @@ fastify.post('/outbound-call', async (request, reply) => {
         recent_conversations: context.recentCalls ? 
           `Here is a summary of recent conversations: ${context.recentCalls.map(call => `${call.summary}`).join(', ')}` : 'No previous call data',
         relevant_news: context.relevantNews ? 
-          "Here is a list of relevant news related to thier interests: " + context.relevantNews.map(news => `${news.title} ${news.summary}`).join(', ') : 'No relevant news'
+          "Here is relevant news for your interests: " + context.relevantNews.map(item => 
+            `For ${item.interest}: ${item.news.map(n => `${n.title} - ${n.summary}`).join('; ')}`
+          ).join('. ').replace(/^\s+|\s+$/g, '') : 'No relevant news'
       };
     }
   } catch (error) {
@@ -129,12 +135,18 @@ fastify.post('/outbound-call', async (request, reply) => {
   }
 
   try {
+    // Store the dynamic variables
+    callContextStore.set(call_id, dynamicVariables);
+
+    // Clean up after 5 minutes
+    setTimeout(() => {
+      callContextStore.delete(call_id);
+    }, 5 * 60 * 1000);
+
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
       to: number,
-      url: `https://${request.headers.host}/outbound-call-twiml?dynamic_variables=${encodeURIComponent(
-        JSON.stringify(dynamicVariables)
-      )}`,
+      url: `https://${request.headers.host}/outbound-call-twiml?call_id=${call_id}`,
     });
 
     reply.send({
@@ -144,6 +156,7 @@ fastify.post('/outbound-call', async (request, reply) => {
     });
   } catch (error) {
     console.error('Error initiating outbound call:', error);
+    callContextStore.delete(call_id);
     reply.code(500).send({
       success: false,
       error: 'Failed to initiate call',
@@ -153,22 +166,13 @@ fastify.post('/outbound-call', async (request, reply) => {
 
 // TwiML route for outbound calls
 fastify.all('/outbound-call-twiml', async (request, reply) => {
-    const dynamic_variables = request.query.dynamic_variables || '';
-
-    // Escape special characters for XML
-    const escapedDynamicVariables = dynamic_variables
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
-
+    const call_id = request.query.call_id;
 
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
             <Stream url="wss://${request.headers.host}/outbound-media-stream">
-                <Parameter name="dynamic_variables" value="${escapedDynamicVariables}"/>
+                <Parameter name="call_id" value="${call_id}"/>
             </Stream>
         </Connect>
     </Response>`;
@@ -181,11 +185,10 @@ fastify.register(async (fastifyInstance) => {
   fastifyInstance.get('/outbound-media-stream', { websocket: true }, (ws, req) => {
     console.info('[Server] Twilio connected to outbound media stream');
 
-    // Variables to track the call
     let streamSid = null;
     let callSid = null;
     let elevenLabsWs = null;
-    let customParameters = null; // Add this to store parameters
+    let call_id = null;
 
     // Handle WebSocket errors
     ws.on('error', console.error);
@@ -198,10 +201,10 @@ fastify.register(async (fastifyInstance) => {
 
         elevenLabsWs.on('open', () => {
           console.log('[ElevenLabs] Connected to Conversational AI');
-          console.log('[ElevenLabs] Dynamic Variables:', customParameters?.dynamic_variables);
-
-          // Parse the dynamic variables
-          const dynamicVars = JSON.parse(customParameters?.dynamic_variables || '{}');
+          
+          // Get dynamic variables from store
+          const dynamicVars = callContextStore.get(call_id) || {};
+          console.log('[ElevenLabs] Dynamic Variables:', dynamicVars);
           
           // Replace template variables in the system prompt
           let filledPrompt = SYSTEM_PROMPT;
@@ -224,7 +227,6 @@ fastify.register(async (fastifyInstance) => {
             },
           };
 
-          // Send the configuration to ElevenLabs
           elevenLabsWs.send(JSON.stringify(initialConfig));
         });
 
@@ -332,9 +334,8 @@ fastify.register(async (fastifyInstance) => {
           case 'start':
             streamSid = msg.start.streamSid;
             callSid = msg.start.callSid;
-            customParameters = msg.start.customParameters; // Store parameters
+            call_id = msg.start.customParameters.call_id;
             console.log(`[Twilio] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`);
-            console.log('[Twilio] Start parameters:', customParameters);
             break;
 
           case 'media':
