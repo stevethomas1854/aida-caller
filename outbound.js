@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import Fastify from 'fastify';
 import Twilio from 'twilio';
 import WebSocket from 'ws';
+import { v4 as uuidv4 } from 'uuid';
+import { createClient } from '@supabase/supabase-js'
 
 // https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
 
@@ -17,6 +19,8 @@ const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   TWILIO_PHONE_NUMBER,
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
 } = process.env;
 
 if (
@@ -45,8 +49,8 @@ fastify.get('/', async (_, reply) => {
 // Initialize Twilio client
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-import { createClient } from '@supabase/supabase-js'
-
+// Initialize Supabase client
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Helper function to get signed URL for authenticated conversations
 async function getSignedUrl() {
@@ -75,9 +79,49 @@ async function getSignedUrl() {
 
 // Route to initiate outbound calls
 fastify.post('/outbound-call', async (request, reply) => {
-  const { number, patient_id, call_type} = request.body;
+  const { number, patient_id, call_type } = request.body;
+  const call_id = uuidv4();
 
-  // 
+  // Initialize default dynamic variables
+  let dynamicVariables = {
+    name: '',
+    age: '',
+    language: 'English',
+    interests: '',
+    medications: '',
+    recent_conversations: 'No previous call data',
+  };
+  
+  try {
+    const response = await fetch(
+      `${supabaseUrl}/functions/v1/getCallContext?id=${call_id}&patientId=${patient_id}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${supabaseKey}`
+        }
+      }
+    );
+
+    if (response.ok) {
+      const context = await response.json();
+      
+      // Set dynamic variables based on context
+      dynamicVariables = {
+        name: context.patient.name,
+        interests: context.interests ? 
+          "Here is a list of interests: " + context.interests.map(i => i.name).join(', ') : 'No interests',
+        medications: context.medications ? 
+          "Here is a list of medications: " + context.medications.map(m => `${m.name} ${m.dosage} ${m.frequency}`).join(', ') : 'No medications',
+        recent_conversations: context.recentCalls ? 
+          `Here is a summary of recent conversations: ${context.recentCalls.map(call => `${call.summary}`).join(', ')}` : 'No previous call data',
+        relevant_news: context.relevantNews ? 
+          "Here is a list of relevant news related to thier interests: " + context.relevantNews.map(news => `${news.title} ${news.summary}`).join(', ') : 'No relevant news'
+      };
+    }
+  } catch (error) {
+    console.error('Error fetching call context:', error);
+    // Continue with default dynamic variables if context fetch fails
+  }
 
   if (!number) {
     return reply.code(400).send({ error: 'Phone number is required' });
@@ -87,9 +131,9 @@ fastify.post('/outbound-call', async (request, reply) => {
     const call = await twilioClient.calls.create({
       from: TWILIO_PHONE_NUMBER,
       to: number,
-      url: `https://${request.headers.host}/outbound-call-twiml?prompt=${encodeURIComponent(
-        prompt
-      )}&first_message=${encodeURIComponent(first_message)}`,
+      url: `https://${request.headers.host}/outbound-call-twiml?dynamic_variables=${encodeURIComponent(
+        JSON.stringify(dynamicVariables)
+      )}`,
     });
 
     reply.send({
@@ -108,15 +152,12 @@ fastify.post('/outbound-call', async (request, reply) => {
 
 // TwiML route for outbound calls
 fastify.all('/outbound-call-twiml', async (request, reply) => {
-  const prompt = request.query.prompt || '';
-  const first_message = request.query.first_message || '';
-
+  const dynamic_variables = request.query.dynamic_variables || '';
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
         <Stream url="wss://${request.headers.host}/outbound-media-stream">
-            <Parameter name="pa" value="${prompt}" />
-            <Parameter name="first_message" value="${first_message}" />
+            <Parameter name="dynamic_variables" value="${dynamic_variables}" />
         </Stream>
         </Connect>
     </Response>`;
@@ -152,18 +193,14 @@ fastify.register(async (fastifyInstance) => {
             type: 'conversation_initiation_client_data',
             conversation_config_override: {
               agent: {
-                prompt: {
-                  prompt: customParameters?.prompt || 'you are a gary from the phone store',
-                },
-                first_message:
-                  customParameters?.first_message || 'hey there! how can I help you today?',
+                dynamicVariables: JSON.parse(dynamic_variables || '{}'),
               },
             },
           };
 
           console.log(
-            '[ElevenLabs] Sending initial config with prompt:',
-            initialConfig.conversation_config_override.agent.prompt.prompt
+            '[ElevenLabs] Sending initial config with dynamic variables:',
+            initialConfig.conversation_config_override.agent.dynamicVariables
           );
 
           // Send the configuration to ElevenLabs

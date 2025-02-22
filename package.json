@@ -15,7 +15,9 @@
     "@fastify/websocket": "^11.0.2",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
+    "supabase": "^2.12.1",
     "twilio": "^5.4.5",
+    "uuid": "^11.1.0",
     "ws": "^8.18.1"
   }
 }
