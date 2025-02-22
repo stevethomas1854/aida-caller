@@ -20,7 +20,7 @@ const {
   TWILIO_AUTH_TOKEN,
   TWILIO_PHONE_NUMBER,
   SUPABASE_URL,
-  SUPABASE_ANON_KEY,
+  SUPABASE_KEY,
 } = process.env;
 
 if (
@@ -50,7 +50,7 @@ fastify.get('/', async (_, reply) => {
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
 // Initialize Supabase client
-const supabase = createClient(supabaseUrl, supabaseKey);
+// const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // Helper function to get signed URL for authenticated conversations
 async function getSignedUrl() {
@@ -94,10 +94,10 @@ fastify.post('/outbound-call', async (request, reply) => {
   
   try {
     const response = await fetch(
-      `${supabaseUrl}/functions/v1/getCallContext?id=${call_id}&patientId=${patient_id}`,
+      `${SUPABASE_URL}/functions/v1/getCallContext?id=${call_id}&patientId=${patient_id}`,
       {
         headers: {
-          'Authorization': `Bearer ${supabaseKey}`
+          'Authorization': `Bearer ${SUPABASE_KEY}`
         }
       }
     );
@@ -152,17 +152,35 @@ fastify.post('/outbound-call', async (request, reply) => {
 
 // TwiML route for outbound calls
 fastify.all('/outbound-call-twiml', async (request, reply) => {
-  const dynamic_variables = request.query.dynamic_variables || '';
-  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+    const dynamic_variables = request.query.dynamic_variables || '';
+    const first_message = request.query.first_message || '';
+
+    // Escape special characters for XML
+    const escapedDynamicVariables = dynamic_variables
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
+    const escapedFirstMessage = first_message
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
+    const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
-        <Stream url="wss://${request.headers.host}/outbound-media-stream">
-            <Parameter name="dynamic_variables" value="${dynamic_variables}" />
-        </Stream>
+            <Stream url="wss://${request.headers.host}/outbound-media-stream">
+                <Parameter name="variables" value="${escapedDynamicVariables}"/>
+                <Parameter name="first_message" value="${escapedFirstMessage}"/>
+            </Stream>
         </Connect>
     </Response>`;
 
-  reply.type('text/xml').send(twimlResponse);
+    reply.type('text/xml').send(twimlResponse);
 });
 
 // WebSocket route for handling media streams
@@ -193,13 +211,22 @@ fastify.register(async (fastifyInstance) => {
             type: 'conversation_initiation_client_data',
             conversation_config_override: {
               agent: {
-                dynamicVariables: JSON.parse(dynamic_variables || '{}'),
+                dynamicVariables: JSON.parse(customParameters?.variables || '{}'),
+                prompt: {
+                  prompt: `You are a friendly AI assistant calling to check in. Be friendly and empathetic. Ask about their well-being and medications. You can discuss their interests.`,
+                },
+                first_message: 'Hello! How are you doing today?',
               },
             },
           };
 
           console.log(
-            '[ElevenLabs] Sending initial config with dynamic variables:',
+            '[ElevenLabs] Sending initial config with prompt:',
+            initialConfig.conversation_config_override.agent.prompt.prompt
+          );
+
+          console.log(
+            '[ElevenLabs] Sending initial config with first message:',
             initialConfig.conversation_config_override.agent.dynamicVariables
           );
 
