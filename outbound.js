@@ -6,6 +6,7 @@ import Twilio from 'twilio';
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { createClient } from '@supabase/supabase-js'
+import { SYSTEM_PROMPT } from './prompt.js';
 
 // https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
 
@@ -20,7 +21,7 @@ const {
   TWILIO_AUTH_TOKEN,
   TWILIO_PHONE_NUMBER,
   SUPABASE_URL,
-  SUPABASE_KEY,
+  SUPABASE_ANON_KEY,
 } = process.env;
 
 if (
@@ -79,16 +80,15 @@ async function getSignedUrl() {
 
 // Route to initiate outbound calls
 fastify.post('/outbound-call', async (request, reply) => {
-  const { number, patient_id, call_type } = request.body;
+  const { number, patient_id } = request.body;
   const call_id = uuidv4();
 
   // Initialize default dynamic variables
   let dynamicVariables = {
     name: '',
-    age: '',
-    language: 'English',
     interests: '',
-    medications: '',
+    medication: '',
+    relevant_news: '',
     recent_conversations: 'No previous call data',
   };
   
@@ -97,10 +97,11 @@ fastify.post('/outbound-call', async (request, reply) => {
       `${SUPABASE_URL}/functions/v1/getCallContext?id=${call_id}&patientId=${patient_id}`,
       {
         headers: {
-          'Authorization': `Bearer ${SUPABASE_KEY}`
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
         }
       }
     );
+    // console.log('[Supabase] Response:', await response.json());
 
     if (response.ok) {
       const context = await response.json();
@@ -110,7 +111,7 @@ fastify.post('/outbound-call', async (request, reply) => {
         name: context.patient.name,
         interests: context.interests ? 
           "Here is a list of interests: " + context.interests.map(i => i.name).join(', ') : 'No interests',
-        medications: context.medications ? 
+        medication: context.medications ? 
           "Here is a list of medications: " + context.medications.map(m => `${m.name} ${m.dosage} ${m.frequency}`).join(', ') : 'No medications',
         recent_conversations: context.recentCalls ? 
           `Here is a summary of recent conversations: ${context.recentCalls.map(call => `${call.summary}`).join(', ')}` : 'No previous call data',
@@ -153,7 +154,6 @@ fastify.post('/outbound-call', async (request, reply) => {
 // TwiML route for outbound calls
 fastify.all('/outbound-call-twiml', async (request, reply) => {
     const dynamic_variables = request.query.dynamic_variables || '';
-    const first_message = request.query.first_message || '';
 
     // Escape special characters for XML
     const escapedDynamicVariables = dynamic_variables
@@ -163,19 +163,12 @@ fastify.all('/outbound-call-twiml', async (request, reply) => {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&apos;');
 
-    const escapedFirstMessage = first_message
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
 
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
         <Connect>
             <Stream url="wss://${request.headers.host}/outbound-media-stream">
-                <Parameter name="variables" value="${escapedDynamicVariables}"/>
-                <Parameter name="first_message" value="${escapedFirstMessage}"/>
+                <Parameter name="dynamic_variables" value="${escapedDynamicVariables}"/>
             </Stream>
         </Connect>
     </Response>`;
@@ -205,30 +198,31 @@ fastify.register(async (fastifyInstance) => {
 
         elevenLabsWs.on('open', () => {
           console.log('[ElevenLabs] Connected to Conversational AI');
+          console.log('[ElevenLabs] Dynamic Variables:', customParameters?.dynamic_variables);
+
+          // Parse the dynamic variables
+          const dynamicVars = JSON.parse(customParameters?.dynamic_variables || '{}');
+          
+          // Replace template variables in the system prompt
+          let filledPrompt = SYSTEM_PROMPT;
+          Object.entries(dynamicVars).forEach(([key, value]) => {
+            filledPrompt = filledPrompt.replace(new RegExp(`{{${key}}}`, 'g'), value);
+          });
+          console.log('[ElevenLabs] Filled Prompt:', filledPrompt);
 
           // Send initial configuration with prompt and first message
           const initialConfig = {
             type: 'conversation_initiation_client_data',
             conversation_config_override: {
               agent: {
-                dynamicVariables: JSON.parse(customParameters?.variables || '{}'),
                 prompt: {
-                  prompt: `You are a friendly AI assistant calling to check in. Be friendly and empathetic. Ask about their well-being and medications. You can discuss their interests.`,
+                  prompt: filledPrompt,
                 },
-                first_message: 'Hello! How are you doing today?',
+                first_message:
+                  `Hey ${dynamicVars.name}! Nice to chat with you, how are you today?`,
               },
             },
           };
-
-          console.log(
-            '[ElevenLabs] Sending initial config with prompt:',
-            initialConfig.conversation_config_override.agent.prompt.prompt
-          );
-
-          console.log(
-            '[ElevenLabs] Sending initial config with first message:',
-            initialConfig.conversation_config_override.agent.dynamicVariables
-          );
 
           // Send the configuration to ElevenLabs
           elevenLabsWs.send(JSON.stringify(initialConfig));
