@@ -226,6 +226,7 @@ fastify.register(async (fastifyInstance) => {
     let elevenLabsWs = null;
     let call_id = null;
     let conversationId = null;
+    
 
     // Handle WebSocket errors
     ws.on('error', console.error);
@@ -272,12 +273,19 @@ fastify.register(async (fastifyInstance) => {
             const message = JSON.parse(data);
 
             switch (message.type) {
+              
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabs] Received initiation metadata');
-                // Capture conversation ID if available - may need updating @steve
-                if (message.conversation_id) {
-                  conversationId = message.conversation_id;
-                  console.log('[ElevenLabs] Conversation ID:', conversationId);
+                // Store the conversation_id along with the call_id
+                if (message.conversation_initiation_metadata_event?.conversation_id) {
+                  const conversationId = message.conversation_initiation_metadata_event.conversation_id;
+                  // conversationStore.set(call_id, conversationId);
+                  console.log(`[ElevenLabs] Conversation ID: ${conversationId} stored for call_id: ${call_id}`);
+                  
+                  // Clean up after 5 minutes (matching the callContextStore cleanup)
+                  // setTimeout(() => {
+                  //   conversationStore.delete(call_id);
+                  // }, 5 * 60 * 1000);
                 }
                 break;
 
