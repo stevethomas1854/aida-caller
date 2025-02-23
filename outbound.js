@@ -312,10 +312,11 @@ fastify.register(async (fastifyInstance) => {
             switch (message.type) {
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabs] Received initiation metadata');
-                if (message.conversation_id && callSid) {
-                  // Store the conversation ID with the call SID as the key
-                  conversationStore.set(callSid, message.conversation_id);
-                  console.log('[ElevenLabs] Stored conversation ID:', message.conversation_id, 'for call:', callSid);
+                // Store the conversation_id along with the call_id
+                if (message.conversation_initiation_metadata_event?.conversation_id) {
+                  const conversationId = message.conversation_initiation_metadata_event.conversation_id;
+                  conversationStore.set(callSid, conversationId);
+                  console.log(`[ElevenLabs] Conversation ID: ${conversationId} stored for call_id: ${callSid}`);
                 }
                 break;
 
