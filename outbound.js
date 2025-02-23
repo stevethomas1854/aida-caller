@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { createClient } from '@supabase/supabase-js'
 import { SYSTEM_PROMPT } from './prompt.js';
+import axios from 'axios';
 
 // https://elevenlabs.io/docs/conversational-ai/guides/twilio/outbound-calling
 
@@ -78,6 +79,41 @@ async function getSignedUrl() {
   } catch (error) {
     console.error('Error getting signed URL:', error);
     throw error;
+  }
+}
+
+// Add this helper function after other helper functions
+async function getConversationHistory(conversationId) {
+  try {
+    const response = await axios.get(
+      `https://api.elevenlabs.io/v1/convai/conversations/${conversationId}`,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'xi-api-key': ELEVENLABS_API_KEY
+        }
+      }
+    );
+
+    const extractedData = {
+      metadata: {
+        start_time_unix_secs: response.data?.metadata?.start_time_unix_secs,
+        call_duration_secs: response.data?.metadata?.call_duration_secs
+      },
+      analysis: {
+        evaluation_criteria_results: response.data?.analysis?.evaluation_criteria_results,
+        data_collection_results: response.data?.analysis?.data_collection_results
+      }
+    };
+
+    console.log('[ElevenLabs] Conversation History:', JSON.stringify(extractedData, null, 2));
+    return extractedData;
+
+  } catch (error) {
+    console.error('[ElevenLabs] Error fetching conversation history:', error.message);
+    if (error.response) {
+      console.error(error.response.data);
+    }
   }
 }
 
@@ -189,6 +225,7 @@ fastify.register(async (fastifyInstance) => {
     let callSid = null;
     let elevenLabsWs = null;
     let call_id = null;
+    let conversationId = null;
 
     // Handle WebSocket errors
     ws.on('error', console.error);
@@ -237,6 +274,11 @@ fastify.register(async (fastifyInstance) => {
             switch (message.type) {
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabs] Received initiation metadata');
+                // Capture conversation ID if available - may need updating @steve
+                if (message.conversation_id) {
+                  conversationId = message.conversation_id;
+                  console.log('[ElevenLabs] Conversation ID:', conversationId);
+                }
                 break;
 
               case 'audio':
@@ -351,6 +393,10 @@ fastify.register(async (fastifyInstance) => {
             console.log(`[Twilio] Stream ${streamSid} ended`);
             if (elevenLabsWs?.readyState === WebSocket.OPEN) {
               elevenLabsWs.close();
+            }
+            // Add this to fetch conversation history after call ends
+            if (conversationId) {
+              getConversationHistory(conversationId);
             }
             break;
 
