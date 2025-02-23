@@ -45,6 +45,7 @@ const PORT = process.env.PORT || 8000;
 
 // Add this near the top of the file with other initializations
 const callContextStore = new Map();
+const conversationStore = new Map(); // Store for conversation IDs
 
 // Root route for health check
 fastify.get('/', async (_, reply) => {
@@ -82,38 +83,75 @@ async function getSignedUrl() {
   }
 }
 
-// Add this helper function after other helper functions
-async function getConversationHistory(conversationId) {
-  try {
-    const response = await axios.get(
-      `https://api.elevenlabs.io/v1/convai/conversations/${conversationId}`,
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'xi-api-key': ELEVENLABS_API_KEY
+// Update the getConversationHistory function with retry logic
+async function getConversationHistory(conversationId, maxRetries = 5, retryDelay = 15000) {
+  let attempts = 0;
+
+  const attemptFetch = async () => {
+    try {
+      const response = await axios.get(
+        `https://api.elevenlabs.io/v1/convai/conversations/${conversationId}`,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'xi-api-key': ELEVENLABS_API_KEY
+          }
         }
+      );
+
+      // Check if we have meaningful data
+      if (!response.data?.analysis?.data_collection_results) {
+        throw new Error('No data collection results available yet');
       }
-    );
 
-    const extractedData = {
-      metadata: {
-        start_time_unix_secs: response.data?.metadata?.start_time_unix_secs,
-        call_duration_secs: response.data?.metadata?.call_duration_secs
-      },
-      analysis: {
-        evaluation_criteria_results: response.data?.analysis?.evaluation_criteria_results,
-        data_collection_results: response.data?.analysis?.data_collection_results
+      const extractedData = {
+        metadata: {
+          start_time_unix_secs: response.data?.metadata?.start_time_unix_secs,
+          call_duration_secs: response.data?.metadata?.call_duration_secs
+        },
+        analysis: {
+          evaluation_criteria_results: response.data?.analysis?.evaluation_criteria_results,
+          data_collection_results: response.data?.analysis?.data_collection_results
+        }
+      };
+
+      console.log('[ElevenLabs] Conversation History:', JSON.stringify(extractedData, null, 2));
+      return extractedData;
+
+    } catch (error) {
+      console.error(`[ElevenLabs] Attempt ${attempts + 1}/${maxRetries} failed:`, error.message);
+      if (error.response) {
+        console.error(error.response.data);
       }
-    };
-
-    console.log('[ElevenLabs] Conversation History:', JSON.stringify(extractedData, null, 2));
-    return extractedData;
-
-  } catch (error) {
-    console.error('[ElevenLabs] Error fetching conversation history:', error.message);
-    if (error.response) {
-      console.error(error.response.data);
+      
+      if (attempts < maxRetries - 1) {
+        attempts++;
+        console.log(`[ElevenLabs] Retrying in ${retryDelay/1000} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        return attemptFetch();
+      } else {
+        console.error('[ElevenLabs] Max retries reached. Failed to fetch conversation history.');
+        return null;
+      }
     }
+  };
+
+  return attemptFetch();
+}
+
+// Add a function to handle conversation history fetching with cleanup
+async function handleConversationHistory(callSid) {
+  const conversationId = conversationStore.get(callSid);
+  if (!conversationId) {
+    console.error('[ElevenLabs] No conversation ID found for call:', callSid);
+    return;
+  }
+
+  try {
+    await getConversationHistory(conversationId);
+  } finally {
+    // Clean up the stored conversation ID
+    conversationStore.delete(callSid);
   }
 }
 
@@ -226,7 +264,6 @@ fastify.register(async (fastifyInstance) => {
     let elevenLabsWs = null;
     let call_id = null;
     let conversationId = null;
-    
 
     // Handle WebSocket errors
     ws.on('error', console.error);
@@ -273,19 +310,12 @@ fastify.register(async (fastifyInstance) => {
             const message = JSON.parse(data);
 
             switch (message.type) {
-              
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabs] Received initiation metadata');
-                // Store the conversation_id along with the call_id
-                if (message.conversation_initiation_metadata_event?.conversation_id) {
-                  const conversationId = message.conversation_initiation_metadata_event.conversation_id;
-                  // conversationStore.set(call_id, conversationId);
-                  console.log(`[ElevenLabs] Conversation ID: ${conversationId} stored for call_id: ${call_id}`);
-                  
-                  // Clean up after 5 minutes (matching the callContextStore cleanup)
-                  // setTimeout(() => {
-                  //   conversationStore.delete(call_id);
-                  // }, 5 * 60 * 1000);
+                if (message.conversation_id && callSid) {
+                  // Store the conversation ID with the call SID as the key
+                  conversationStore.set(callSid, message.conversation_id);
+                  console.log('[ElevenLabs] Stored conversation ID:', message.conversation_id, 'for call:', callSid);
                 }
                 break;
 
@@ -402,9 +432,9 @@ fastify.register(async (fastifyInstance) => {
             if (elevenLabsWs?.readyState === WebSocket.OPEN) {
               elevenLabsWs.close();
             }
-            // Add this to fetch conversation history after call ends
-            if (conversationId) {
-              getConversationHistory(conversationId);
+            // Initiate conversation history fetching
+            if (callSid) {
+              handleConversationHistory(callSid);
             }
             break;
 
@@ -421,6 +451,10 @@ fastify.register(async (fastifyInstance) => {
       console.log('[Twilio] Client disconnected');
       if (elevenLabsWs?.readyState === WebSocket.OPEN) {
         elevenLabsWs.close();
+      }
+      // Ensure we attempt to fetch conversation history on WebSocket closure as well
+      if (callSid) {
+        handleConversationHistory(callSid);
       }
     });
   });
