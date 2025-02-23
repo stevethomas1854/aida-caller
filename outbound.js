@@ -44,6 +44,10 @@ const PORT = process.env.PORT || 8000;
 
 // Add this near the top of the file with other initializations
 const callContextStore = new Map();
+const conversationStore = new Map();
+
+// Initialize Supabase client
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // Root route for health check
 fastify.get('/', async (_, reply) => {
@@ -52,9 +56,6 @@ fastify.get('/', async (_, reply) => {
 
 // Initialize Twilio client
 const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-
-// Initialize Supabase client
-// const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // Helper function to get signed URL for authenticated conversations
 async function getSignedUrl() {
@@ -78,6 +79,114 @@ async function getSignedUrl() {
   } catch (error) {
     console.error('Error getting signed URL:', error);
     throw error;
+  }
+}
+
+// Helper function to implement delay
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function to fetch conversation data with retry
+async function fetchConversationWithRetry(conversation_id, maxRetries = 3, initialDelay = 60000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/convai/conversation/${conversation_id}`,
+        {
+          method: 'GET',
+          headers: {
+            'xi-api-key': ELEVENLABS_API_KEY,
+          },
+        }
+      );
+
+      if (response.ok) {
+        return await response.json();
+      }
+
+      // If we're here, response wasn't ok
+      console.log(`Attempt ${attempt}/${maxRetries} failed. Status: ${response.status}`);
+      
+      if (attempt < maxRetries) {
+        const backoffDelay = initialDelay * Math.pow(2, attempt - 1);
+        console.log(`Waiting ${backoffDelay/1000} seconds before retry...`);
+        await delay(backoffDelay);
+      }
+    } catch (error) {
+      console.error(`Attempt ${attempt}/${maxRetries} error:`, error);
+      
+      if (attempt < maxRetries) {
+        const backoffDelay = initialDelay * Math.pow(2, attempt - 1);
+        console.log(`Waiting ${backoffDelay/1000} seconds before retry...`);
+        await delay(backoffDelay);
+      } else {
+        throw error; // Rethrow if all retries failed
+      }
+    }
+  }
+  throw new Error(`Failed to fetch conversation data after ${maxRetries} attempts`);
+}
+
+// Update the processConversationData function
+async function processConversationData(call_id, conversation_id) {
+  try {
+    const data = await fetchConversationWithRetry(conversation_id);
+    console.log('[ElevenLabs] Conversation Data:', data);
+    
+    // Process each type of data collection result
+    if (data.data_collection_results) {
+      const results = [];
+      
+      // Process key points
+      if (data.data_collection_results.key_points) {
+        results.push(...data.data_collection_results.key_points.map(point => ({
+          call_id,
+          point,
+          collection_type: 'key_point'
+        })));
+      }
+      
+      // Process action items
+      if (data.data_collection_results.action_items) {
+        results.push(...data.data_collection_results.action_items.map(point => ({
+          call_id,
+          point,
+          collection_type: 'action_item'
+        })));
+      }
+      
+      // Process follow up questions
+      if (data.data_collection_results.follow_up_questions) {
+        results.push(...data.data_collection_results.follow_up_questions.map(point => ({
+          call_id,
+          point,
+          collection_type: 'follow_up_question'
+        })));
+      }
+      
+      // Process summary points
+      if (data.data_collection_results.summary_points) {
+        results.push(...data.data_collection_results.summary_points.map(point => ({
+          call_id,
+          point,
+          collection_type: 'summary_point'
+        })));
+      }
+
+      // Store all results in Supabase
+      if (results.length > 0) {
+        const { error } = await supabase
+          .from('call_data_collection')
+          .insert(results);
+          
+        if (error) {
+          console.error('[Supabase] Error storing data collection results:', error);
+        } else {
+          console.log(`[Supabase] Successfully stored ${results.length} data collection points`);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error processing conversation data:', error);
   }
 }
 
@@ -237,6 +346,17 @@ fastify.register(async (fastifyInstance) => {
             switch (message.type) {
               case 'conversation_initiation_metadata':
                 console.log('[ElevenLabs] Received initiation metadata');
+                // Store the conversation_id along with the call_id
+                if (message.conversation_initiation_metadata_event?.conversation_id) {
+                  const conversationId = message.conversation_initiation_metadata_event.conversation_id;
+                  conversationStore.set(call_id, conversationId);
+                  console.log(`[ElevenLabs] Conversation ID: ${conversationId} stored for call_id: ${call_id}`);
+                  
+                  // Clean up after 5 minutes (matching the callContextStore cleanup)
+                  setTimeout(() => {
+                    conversationStore.delete(call_id);
+                  }, 5 * 60 * 1000);
+                }
                 break;
 
               case 'audio':
@@ -363,11 +483,20 @@ fastify.register(async (fastifyInstance) => {
     });
 
     // Handle WebSocket closure
-    ws.on('close', () => {
+    ws.on('close', async () => {
       console.log('[Twilio] Client disconnected');
       if (elevenLabsWs?.readyState === WebSocket.OPEN) {
         elevenLabsWs.close();
       }
+      
+      // Process conversation data before cleanup
+      const conversation_id = conversationStore.get(call_id);
+      if (call_id && conversation_id) {
+        await processConversationData(call_id, conversation_id);
+      }
+      
+      // Clean up the conversation store
+      conversationStore.delete(call_id);
     });
   });
 });
